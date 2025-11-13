@@ -943,3 +943,369 @@ ELSE:
 4. Правила использования (когда вызывать, когда нет)
 
 ---
+
+## 3. Multimodal Pipeline
+
+**Назначение:** Обработка запросов с изображениями (vision models).
+
+**Точка входа:** `server/routes.go:ChatHandler()` с images в messages
+
+### 3.1 Схема Multimodal Pipeline
+
+```
+   [User Request with Images]
+        │
+        ├─ messages: [{
+        │    "role": "user",
+        │    "content": "What's in this image?",
+        │    "images": [base64_encoded_image]
+        │  }]
+        │
+        ▼
+   ┌────────────────────────────────────┐
+   │  1. chatPrompt()                   │  server/prompt.go:72-96
+   │  - Process each message            │
+   │  - For each image:                 │
+   │    • Create llm.ImageData with ID  │
+   │    • Generate tag [img-N]          │
+   │    • Replace [img] placeholder OR  │
+   │    • Prepend tag to content        │
+   │  - Count 768 tokens per image      │
+   └────────────┬───────────────────────┘
+                │
+                ▼
+   ┌────────────────────────────────────┐
+   │  2. Validate Image Count           │
+   │  - mllama: max 1 image             │
+   │  - others: unlimited               │
+   └────────────┬───────────────────────┘
+                │
+                ▼
+   ┌────────────────────────────────────────────┐
+   │  3. renderPrompt() - Vision Renderer       │
+   │  ┌──────────────────────────────────────┐  │
+   │  │ Qwen3-VL:                            │  │
+   │  │  IF useImgTags:                      │  │
+   │  │    Insert "[img]" for each image     │  │
+   │  │  ELSE:                               │  │
+   │  │    Insert "<|vision_start|>          │  │
+   │  │           <|image_pad|>              │  │
+   │  │           <|vision_end|>"            │  │
+   │  └──────────────────────────────────────┘  │
+   └────────────┬───────────────────────────────┘
+                │
+                ▼
+   ┌────────────────────────────────────┐
+   │  4. Template with Image Tags       │
+   │                                    │
+   │  <|im_start|>user                  │
+   │  <|vision_start|><|image_pad|>     │
+   │  <|vision_end|>                    │
+   │  What's in this image?<|im_end|>   │
+   │  <|im_start|>assistant             │
+   └────────────┬───────────────────────┘
+                │
+                ▼
+   ┌────────────────────────────────────┐
+   │  5. llm.Completion()               │
+   │  - Send prompt + image data        │
+   │  - LLM processes vision inputs     │
+   │  - Generate description            │
+   └────────────┬───────────────────────┘
+                │
+                ▼
+   [Response: "The image shows..."]
+```
+
+**Ключевые моменты:**
+- Изображения = 768 токенов каждое
+- Всегда в начале сообщения
+- Модель-специфичные токены vision
+- Проверка лимитов модели
+
+---
+
+## 4. Thinking Mode Pipeline
+
+**Назначение:** Обработка моделей с режимом размышлений (reasoning).
+
+**Точка входа:** `server/routes.go:ChatHandler()` для thinking-capable models
+
+### 4.1 Схема Thinking Pipeline
+
+```
+   [User Request]
+        │
+        ▼
+   ┌────────────────────────────────────┐
+   │  1. Check Model Supports Thinking  │
+   │  - Qwen3-VL-Thinking: YES          │
+   │  - Others: Optional                │
+   └────────────┬───────────────────────┘
+                │
+                ▼
+   ┌────────────────────────────────────────┐
+   │  2. Template.InferTags()               │  thinking/template.go:57
+   │  - Parse template for {{.Thinking}}    │
+   │  - Find surrounding text nodes         │
+   │  - Extract opening/closing tags        │
+   │  Example: <think> / </think>           │
+   └────────────┬─────────────────────────────┘
+                │
+                ▼
+   ┌─────────────────────────────────────┐
+   │  3. Render Prompt with Think Tags   │
+   │                                     │
+   │  <|im_start|>assistant              │
+   │  <think>                            │
+   │  [LLM generates reasoning here]     │
+   │  </think>                           │
+   │                                     │
+   │  [Final answer here]                │
+   │  <|im_end|>                         │
+   └────────────┬────────────────────────┘
+                │
+                ▼
+   ┌──────────────────────────────────────┐
+   │  4. Stream Response Through Parser   │  thinking/parser.go:57
+   │  ┌────────────────────────────────┐  │
+   │  │ State Machine:                 │  │
+   │  │                                │  │
+   │  │ LookingForOpening              │  │
+   │  │   ↓ see "<think>"              │  │
+   │  │ ThinkingStartedEatingWhitespace│  │
+   │  │   ↓ skip whitespace            │  │
+   │  │ Thinking                       │  │
+   │  │   ↓ accumulate content         │  │
+   │  │ ThinkingDoneEatingWhitespace   │  │
+   │  │   ↓ see "</think>"             │  │
+   │  │ ThinkingDone                   │  │
+   │  └────────────────────────────────┘  │
+   └────────────┬─────────────────────────┘
+                │
+                ▼
+   ┌─────────────────────────────────────┐
+   │  5. Separate Thinking from Content  │
+   │                                     │
+   │  thinking: "Step 1: analyze...      │
+   │             Step 2: conclude..."    │
+   │                                     │
+   │  content: "The answer is X"         │
+   └────────────┬────────────────────────┘
+                │
+                ▼
+   [Client receives both thinking + content]
+   {
+     "message": {
+       "role": "assistant",
+       "thinking": "[reasoning process]",
+       "content": "[final answer]"
+     }
+   }
+```
+
+**Data Flow:**
+- Thinking tagged by model during generation
+- Parser extracts in real-time
+- Separated in API response
+- Can be hidden or shown to user
+
+---
+
+## 5. Streaming vs Non-Streaming
+
+### 5.1 Streaming Mode (Default)
+
+```
+Client Request: stream=true
+    ↓
+Setup chunked transfer encoding
+    ↓
+For each token generated:
+    ├─ Format as NDJSON
+    ├─ {"model":"...","message":{"content":"H"},"done":false}
+    ├─ Write to response stream
+    └─ Flush immediately
+    ↓
+Final chunk:
+    {"model":"...","message":{"content":""},"done":true,"total_duration":...}
+```
+
+**Benefits:**
+- Lower latency to first token
+- Real-time user feedback
+- Can cancel mid-stream
+
+### 5.2 Non-Streaming Mode
+
+```
+Client Request: stream=false
+    ↓
+Accumulate all tokens
+    ↓
+Wait for generation complete
+    ↓
+Send single response:
+    {"model":"...","message":{"content":"[full text]"},"done":true}
+```
+
+**Benefits:**
+- Simpler client code
+- Single response object
+- Easier error handling
+
+---
+
+## 6. Template Rendering Pipeline
+
+**Расположение:** `template/template.go`
+
+### 6.1 Execution Flow
+
+```
+   renderPrompt()
+        ↓
+   ┌──────────────────────────────┐
+   │  1. Create Values{}          │
+   │  {                           │
+   │    Messages: []Message       │
+   │    Tools: []Tool             │
+   │    System: string            │
+   │    Prompt: string            │
+   │  }                           │
+   └──────────┬───────────────────┘
+              │
+              ▼
+   ┌──────────────────────────────┐
+   │  2. collate()                │  template.go:354
+   │  - Merge consecutive msgs    │
+   │  - Extract system messages   │
+   └──────────┬───────────────────┘
+              │
+              ▼
+   ┌──────────────────────────────┐
+   │  3. template.Execute()       │
+   │  - Range over Messages       │
+   │  - Apply format per role     │
+   │  - Insert special tokens     │
+   └──────────┬───────────────────┘
+              │
+              ▼
+   [Formatted Prompt String]
+```
+
+**Template Functions:**
+- `{{.Messages}}` - iterate messages
+- `{{.System}}` - system prompt
+- `{{.Tools}}` - tool definitions
+- `{{.Thinking}}` - thinking mode flag
+
+---
+
+## 7. Context Window Management
+
+**Расположение:** `server/prompt.go:chatPrompt()`
+
+### 7.1 Token Budget Algorithm
+
+```
+Available Context = NumCtx (e.g., 2048)
+    ↓
+Calculate token costs:
+    ├─ Each message: tokenize(render(message))
+    ├─ Each image: 768 tokens
+    └─ System messages: always included
+    ↓
+Backward Fitting:
+    FOR i = len(messages)-1 DOWN TO 0:
+        cost = tokens(system + messages[i:])
+        IF cost > context:
+            BREAK
+        FIT messages[i:]
+    ↓
+Always include:
+    - Last user message (messages[n])
+    - All system messages
+```
+
+**Example:**
+```
+Context: 500 tokens
+Messages:
+  [0] system: 50 tokens  ← always
+  [1] user: 100 tokens
+  [2] asst: 150 tokens
+  [3] user: 100 tokens
+  [4] asst: 150 tokens
+  [5] user: 80 tokens    ← always
+
+Fit check:
+  [0]+[5] = 130 ✓
+  [0]+[4]+[5] = 280 ✓
+  [0]+[3]+[4]+[5] = 380 ✓
+  [0]+[2]+[3]+[4]+[5] = 530 ✗ STOP
+
+Final: messages[3:5] + system
+```
+
+---
+
+## 8. Summary: Complete Request Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     COMPLETE FLOW                            │
+└─────────────────────────────────────────────────────────────┘
+
+1. Client Request
+    ↓
+2. ChatHandler
+    ├─ Validate
+    ├─ Load Model
+    └─ Parse Options
+    ↓
+3. chatPrompt()
+    ├─ Truncate to context
+    ├─ Handle images (768 tok ea)
+    └─ Keep system + last
+    ↓
+4. renderPrompt()
+    ├─ Custom Renderer OR
+    └─ Template Execution
+    ↓
+5. Inject Prompts
+    ├─ System prompt
+    ├─ Tool definitions
+    └─ Format markers
+    ↓
+6. llm.Completion()
+    ├─ Send to backend
+    └─ Configure sampling
+    ↓
+7. Stream Response
+    ├─ Parse thinking (if enabled)
+    ├─ Parse tool calls (if present)
+    └─ Format NDJSON
+    ↓
+8. Client Receives
+    ├─ Text response OR
+    ├─ Tool calls (→ execute → return) OR
+    └─ Thinking + content
+```
+
+---
+
+## Заключение
+
+Все пайплайны в Ollama следуют общим принципам:
+1. **Валидация входных данных**
+2. **Загрузка и проверка модели**
+3. **Подготовка контекста с учетом ограничений**
+4. **Рендеринг промпта в нужном формате**
+5. **Генерация с потоковой обработкой**
+6. **Парсинг и структурирование вывода**
+7. **Доставка результата клиенту**
+
+Каждый пайплайн расширяет базовый chat flow дополнительными возможностями, сохраняя общую архитектуру.
+
+---
