@@ -109,3 +109,201 @@ You are a powerful conversational AI trained by Cohere to help people. You are a
 - Поддерживает пользовательский пreamble через переменную `.System`
 
 ---
+
+## 2. Промты для инструментов (Tool-Related Prompts)
+
+Промты этой категории инструктируют AI модель о том, как использовать доступные инструменты для выполнения задач: поиск в интернете, чтение веб-страниц, вызов функций.
+
+### 2.1 Промт для веб-поиска (BrowserWebSearch)
+
+**Назначение:** Инструктирует модель как правильно использовать инструмент веб-поиска. Промт динамически включает текущую дату для более точных поисковых запросов.
+
+**Расположение:** `app/tools/browser_websearch.go:48-56`
+
+**Промт:**
+```
+Use the gpt_oss_web_search tool to search the web.
+1. Come up with a list of search queries to get comprehensive information (typically 2-3 related queries work well)
+2. Use the gpt_oss_web_search tool with multiple queries to get results organized by query
+3. Use the search results to provide current up to date, accurate information
+
+Today's date is [DYNAMIC: Current Date in format "January 2, 2006"]
+Add "[DYNAMIC: Current Date]" for news queries and [DYNAMIC: Next Year] for other queries that need current information.
+```
+
+**Динамические компоненты:**
+- `Today's date` - подставляется текущая дата в формате "January 2, 2006"
+- Рекомендация добавлять текущую дату для новостных запросов
+- Рекомендация добавлять следующий год для запросов, требующих актуальной информации
+
+**Особенности:**
+- Рекомендует использовать 2-3 связанных запроса для comprehensive информации
+- Акцент на актуальность и точность информации
+- Результаты организованы по запросам
+
+---
+
+### 2.2 Промт для краулинга веб-страниц (BrowserCrawler)
+
+**Назначение:** Инструктирует модель как использовать инструмент для чтения содержимого веб-страниц. Включает правила использования и ограничения.
+
+**Расположение:** `app/tools/browser_crawl.go:53-64`
+
+**Промт:**
+```
+When you need to read content from web pages, use the get_webpage tool. Simply provide the URLs you want to read and I'll fetch their content for you.
+
+For each URL, I'll extract the main text content in a readable format. If you need to discover links within those pages, set extract_links to true. If the user requires the latest information, set livecrawl to true.
+
+Only use this tool when you need to access current web content. Make sure the URLs are valid and accessible. Do not use this tool for:
+- Downloading files or media
+- Accessing private/authenticated pages
+- Scraping data at high volumes
+
+Always check the returned content to ensure it's relevant before using it in your response.
+```
+
+**Особенности:**
+- Извлекает основной текстовый контент в читаемом формате
+- Параметр `extract_links` для получения ссылок со страницы
+- Параметр `livecrawl` для получения самой актуальной информации
+- Явные ограничения: не для скачивания файлов, не для приватных страниц, не для mass scraping
+- Требование проверять релевантность полученного контента
+
+---
+
+### 2.3 Промт для инструментов Qwen (Tool Calling Format)
+
+**Назначение:** Инструктирует модель Qwen как правильно вызывать функции с использованием XML-формата. Этот промт добавляется к системному сообщению когда доступны инструменты.
+
+**Расположение:** `model/renderers/qwen3coder.go:88-133`
+
+**Промт часть 1 (Описание инструментов):**
+```
+
+# Tools
+
+You have access to the following functions:
+
+<tools>
+[DYNAMIC: List of tools in XML format]
+<function>
+<name>[function_name]</name>
+<description>[function_description]</description>
+<parameters>
+<parameter>
+<name>[parameter_name]</name>
+<type>[parameter_type]</type>
+<description>[parameter_description]</description>
+[additional_properties]
+</parameter>
+...
+</parameters>
+</function>
+...
+</tools>
+```
+
+**Промт часть 2 (Формат вызова):**
+```
+
+If you choose to call a function ONLY reply in the following format with NO suffix:
+
+<tool_call>
+<function=example_function_name>
+<parameter=example_parameter_1>
+value_1
+</parameter>
+<parameter=example_parameter_2>
+This is the value for the second parameter
+that can span
+multiple lines
+</parameter>
+</function>
+</tool_call>
+
+<IMPORTANT>
+Reminder:
+- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags
+- Required parameters MUST be specified
+- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after
+- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls
+</IMPORTANT>
+```
+
+**Особенности:**
+- Использует XML-формат для определения инструментов (а не JSON)
+- Вложенная структура: `<tool_call>` → `<function=name>` → `<parameter=name>`
+- Параметры могут быть многострочными
+- Разрешено естественное рассуждение ПЕРЕД вызовом функции
+- Строгое требование формата для вызовов
+
+---
+
+### 2.4 Промт для инструментов Qwen3-VL (Vision + Tools)
+
+**Назначение:** Инструктирует модель Qwen3-VL (мультимодальная модель) как вызывать функции. Похож на Qwen3-Coder, но адаптирован для работы с визуальным контентом.
+
+**Расположение:** `model/renderers/qwen3vl.go:82-90`
+
+**Промт:**
+```
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": "function_name", "arguments": {"arg_1": "value_1", "arg_2": "value_2", ...}}
+</tool_call>
+```
+
+**Особенности:**
+- Использует JSON внутри XML тегов (отличается от Qwen3-Coder)
+- Может вызывать несколько функций одновременно
+- Более простой формат по сравнению с Qwen3-Coder
+- Адаптирован для работы с визуальным контентом
+
+---
+
+### 2.5 Промт для инструментов Command-R (Tool Action Format)
+
+**Назначение:** Инструктирует модель Command-R как выполнять действия с инструментами. Промт интегрирован в шаблон чата и появляется после каждого пользовательского сообщения когда доступны инструменты.
+
+**Расположение:** `template/command-r.gotmpl:41-48`
+
+**Промт:**
+```
+Write 'Action:' followed by a json-formatted list of actions that you want to perform in order to produce a good response to the user's last input. You can use any of the supplied tools any number of times, but you should aim to execute the minimum number of necessary actions for the input. You should use the `directly-answer` tool if calling the other tools is unnecessary. The list of actions you want to call should be formatted as a list of json objects, for example:
+```json
+[
+    {
+        "tool_name": title of the tool in the specification,
+        "parameters": a dict of parameters to input into the tool as they are defined in the specs, or {} if it takes no parameters
+    }
+]```
+```
+
+**Формат инструментов Command-R (Python):**
+```python
+def [function_name](
+[parameter_name]: [parameter_type], ...) -> List[Dict]:
+    '''[function_description]
+
+    Args:
+        [parameter_name] ([parameter_type]): [parameter_description]
+        ...
+    '''
+    pass
+```
+
+**Особенности:**
+- Инструменты описываются как Python функции с docstrings
+- Ответ должен начинаться с слова "Action:"
+- Формат вызова - JSON массив объектов
+- Поддержка специального инструмента `directly-answer` для прямых ответов без инструментов
+- Минимизация количества вызовов инструментов
+- Результаты инструментов возвращаются в формате `<results>console_output: [content]</results>`
+
+---
