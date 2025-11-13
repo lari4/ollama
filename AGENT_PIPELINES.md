@@ -421,3 +421,525 @@ llm.Completion → Client:
 ```
 
 ---
+
+## 2. Tool Calling Pipeline
+
+**Назначение:** Обработка запросов с вызовом инструментов (functions/tools). Модель может вызывать функции для получения дополнительной информации.
+
+**Точка входа:** `server/routes.go:ChatHandler()` с `tools` в запросе
+
+### 2.1 Общая схема Tool Calling
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   TOOL CALLING PIPELINE                          │
+└─────────────────────────────────────────────────────────────────┘
+
+   [User Request with Tools]
+        │
+        ├─ POST /api/chat
+        │  {
+        │    "model": "qwen3-coder",
+        │    "messages": [
+        │      {"role": "user", "content": "What's the weather?"}
+        │    ],
+        │    "tools": [
+        │      {
+        │        "type": "function",
+        │        "function": {
+        │          "name": "get_weather",
+        │          "description": "Get weather for location",
+        │          "parameters": {...}
+        │        }
+        │      }
+        │    ]
+        │  }
+        │
+        ▼
+   ┌─────────────────────────────────┐
+   │  1. ChatHandler                 │
+   │  - Validate tools               │
+   │  - Check model capabilities     │
+   │  - Prepare tool definitions     │
+   └──────────┬──────────────────────┘
+              │
+              ▼
+   ┌──────────────────────────────────────────┐
+   │  2. renderPrompt() with Tools            │
+   │  ┌────────────────────────────────────┐  │
+   │  │ Route to model-specific renderer:  │  │
+   │  │                                    │  │
+   │  │ qwen3-coder  → XML format          │  │
+   │  │ qwen3-vl     → JSON in XML         │  │
+   │  │ command-r    → Python format       │  │
+   │  └────────────────────────────────────┘  │
+   └──────────┬───────────────────────────────┘
+              │
+              ▼
+   ┌─────────────────────────────────────────────┐
+   │  3. Inject Tool Definitions into System     │
+   │  ┌───────────────────────────────────────┐  │
+   │  │ Qwen Format:                          │  │
+   │  │                                       │  │
+   │  │ # Tools                               │  │
+   │  │ You have access to:                   │  │
+   │  │ <tools>                               │  │
+   │  │   <function>                          │  │
+   │  │     <name>get_weather</name>          │  │
+   │  │     <description>...</description>    │  │
+   │  │     <parameters>...</parameters>      │  │
+   │  │   </function>                         │  │
+   │  │ </tools>                              │  │
+   │  │                                       │  │
+   │  │ Format: <tool_call>...</tool_call>    │  │
+   │  └───────────────────────────────────────┘  │
+   └──────────┬──────────────────────────────────┘
+              │
+              ▼
+   ┌──────────────────────────────────┐
+   │  4. LLM Generates Response       │
+   │                                  │
+   │  Output может содержать:         │
+   │  a) Tool call                    │
+   │  b) Text response                │
+   │  c) Both                         │
+   └──────────┬─────────────────────────┘
+              │
+              ▼
+   ┌──────────────────────────────────────┐
+   │  5. Parse Response                   │
+   │  ┌────────────────────────────────┐  │
+   │  │ Stream chunks through parsers: │  │
+   │  │                                │  │
+   │  │ Chunk → BuiltinParser          │  │
+   │  │         (для встроенных tools) │  │
+   │  │      ↓                          │  │
+   │  │      GenericToolParser          │  │
+   │  │         (для JSON/XML)          │  │
+   │  └────────────────────────────────┘  │
+   └──────────┬───────────────────────────┘
+              │
+              ▼
+   ┌──────────────────────────────────────────┐
+   │  6. Extract Tool Calls                   │
+   │  ┌────────────────────────────────────┐  │
+   │  │ Example extraction:                │  │
+   │  │                                    │  │
+   │  │ <tool_call>                        │  │
+   │  │ <function=get_weather>             │  │
+   │  │ <parameter=location>               │  │
+   │  │ San Francisco                      │  │
+   │  │ </parameter>                       │  │
+   │  │ </function>                        │  │
+   │  │ </tool_call>                       │  │
+   │  │                                    │  │
+   │  │ Parsed to:                         │  │
+   │  │ {                                  │  │
+   │  │   "name": "get_weather",           │  │
+   │  │   "arguments": {                   │  │
+   │  │     "location": "San Francisco"    │  │
+   │  │   }                                │  │
+   │  │ }                                  │  │
+   │  └────────────────────────────────────┘  │
+   └──────────┬───────────────────────────────┘
+              │
+              ▼
+   ┌──────────────────────────────────┐
+   │  7. Tool Call Decision           │
+   │  ┌────────────────────────────┐  │
+   │  │ IF tool calls found:       │  │
+   │  │   - Send to client         │  │
+   │  │   - Wait for tool results  │  │
+   │  │ ELSE:                      │  │
+   │  │   - Send text response     │  │
+   │  └────────────────────────────┘  │
+   └──────────┬─────────────────────────┘
+              │
+       ┌──────┴────────┐
+       │               │
+    Tool Call      Text Response
+       │               │
+       ▼               ▼
+   [Client]        [Client]
+   Receives:       Receives:
+   {               {
+     "message": {    "message": {
+       "role": "..     "role": "ass..",
+       "tool_calls": [ "content": "..."
+         {             },
+           "function": {"done": true
+             "name": ".."
+             "argumen.."
+           }
+         }
+       ]
+     }
+   }
+
+   │
+   ▼
+   [Client Executes Tool]
+   result = get_weather("San Francisco")
+
+   │
+   ▼
+   [Client Sends Tool Result]
+   POST /api/chat
+   {
+     "messages": [
+       {"role": "user", "content": "What's the weather?"},
+       {"role": "assistant", "tool_calls": [...]},
+       {"role": "tool", "content": "Temperature: 72°F, Sunny"}
+     ]
+   }
+
+   │
+   ▼
+   ┌────────────────────────────────────┐
+   │  8. Second LLM Call                │
+   │  - Include tool result in context  │
+   │  - Generate final answer           │
+   └────────────┬───────────────────────┘
+                │
+                ▼
+   [Client receives final response]
+   {
+     "message": {
+       "role": "assistant",
+       "content": "The weather in San Francisco is 72°F and sunny."
+     },
+     "done": true
+   }
+```
+
+### 2.2 Детальное описание этапов
+
+#### Этап 1: Валидация инструментов
+
+**Проверки:**
+1. Формат tool definition:
+   ```go
+   type Tool struct {
+       Type     string   // "function"
+       Function Function
+   }
+
+   type Function struct {
+       Name        string
+       Description string
+       Parameters  Parameters
+   }
+   ```
+
+2. Capabilities модели:
+   ```go
+   if !model.SupportsTools() {
+       return error("model doesn't support tools")
+   }
+   ```
+
+---
+
+#### Этап 2-3: Рендеринг с инструментами
+
+**Qwen3-Coder формат:**
+
+**Расположение:** `model/renderers/qwen3coder.go:77-136`
+
+```xml
+<|im_start|>system
+You are Qwen, a helpful AI assistant that can interact with a computer to solve tasks.
+
+# Tools
+
+You have access to the following functions:
+
+<tools>
+<function>
+<name>get_weather</name>
+<description>Get current weather for a location</description>
+<parameters>
+<parameter>
+<name>location</name>
+<type>string</type>
+<description>City name</description>
+</parameter>
+<parameter>
+<name>unit</name>
+<type>string</type>
+<description>Temperature unit (celsius or fahrenheit)</description>
+</parameter>
+</parameters>
+</function>
+</tools>
+
+If you choose to call a function ONLY reply in the following format with NO suffix:
+
+<tool_call>
+<function=example_function_name>
+<parameter=example_parameter_1>
+value_1
+</parameter>
+<parameter=example_parameter_2>
+This is the value for the second parameter
+that can span
+multiple lines
+</parameter>
+</function>
+</tool_call>
+
+<IMPORTANT>
+Reminder:
+- Function calls MUST follow the specified format
+- Required parameters MUST be specified
+- You may provide optional reasoning BEFORE the function call, but NOT after
+</IMPORTANT>
+<|im_end|>
+<|im_start|>user
+What's the weather in San Francisco?<|im_end|>
+<|im_start|>assistant
+```
+
+**Command-R формат:**
+
+**Расположение:** `template/command-r.gotmpl:13-48`
+
+```python
+## Available Tools
+Here is a list of tools that you have available to you:
+
+```python
+def get_weather(location: str, unit: str) -> List[Dict]:
+    '''Get current weather for a location
+
+    Args:
+        location (str): City name
+        unit (str): Temperature unit (celsius or fahrenheit)
+    '''
+    pass
+```
+
+Write 'Action:' followed by a json-formatted list of actions...
+```json
+[
+    {
+        "tool_name": "get_weather",
+        "parameters": {
+            "location": "San Francisco",
+            "unit": "fahrenheit"
+        }
+    }
+]```
+```
+
+---
+
+#### Этап 4-5: Парсинг tool calls
+
+**Parser Chain:**
+
+**Расположение:** `tools/tools.go`
+
+```go
+// Builtin Parser - для встроенных инструментов
+type BuiltinParser struct {
+    ToolNames map[string]bool
+}
+
+// Generic Parser - для пользовательских инструментов
+type GenericToolParser struct {
+    State      parserState
+    Buffer     strings.Builder
+    ToolCalls  []ToolCall
+}
+```
+
+**State Machine:**
+```
+States:
+  - Outside: ищем начало tool call
+  - InToolCall: внутри <tool_call>
+  - InFunction: внутри <function=name>
+  - InParameter: внутри <parameter=name>
+  - InJSON: парсим JSON (для некоторых форматов)
+
+Transitions:
+  Outside → InToolCall:  видим "<tool_call>"
+  InToolCall → InFunction:  видим "<function="
+  InFunction → InParameter:  видим "<parameter="
+  InParameter → InFunction:  видим "</parameter>"
+  InFunction → InToolCall:  видим "</function>"
+  InToolCall → Outside:  видим "</tool_call>"
+```
+
+**Пример парсинга:**
+
+Input stream:
+```
+I'll check the weather for you.
+
+<tool_call>
+<function=get_weather>
+<parameter=location>
+San Francisco
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>
+
+Let me get that information.
+```
+
+Parsed output:
+```go
+ToolCalls: [
+  {
+    Function: {
+      Name: "get_weather",
+      Arguments: {
+        "location": "San Francisco",
+        "unit": "fahrenheit"
+      }
+    }
+  }
+]
+
+RemainingText: "I'll check the weather for you.\n\nLet me get that information."
+```
+
+---
+
+#### Этап 6-7: Отправка результатов клиенту
+
+**Response format:**
+
+```json
+{
+  "model": "qwen3-coder",
+  "created_at": "2024-01-15T10:30:00Z",
+  "message": {
+    "role": "assistant",
+    "content": "I'll check the weather for you.",
+    "tool_calls": [
+      {
+        "function": {
+          "name": "get_weather",
+          "arguments": {
+            "location": "San Francisco",
+            "unit": "fahrenheit"
+          }
+        }
+      }
+    ]
+  },
+  "done": true
+}
+```
+
+---
+
+#### Этап 8: Второй раунд с результатами
+
+**Client sends tool results:**
+
+```json
+{
+  "model": "qwen3-coder",
+  "messages": [
+    {"role": "user", "content": "What's the weather in San Francisco?"},
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "name": "get_weather",
+            "arguments": {
+              "location": "San Francisco",
+              "unit": "fahrenheit"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "{\"temperature\": 72, \"condition\": \"sunny\", \"humidity\": 45}"
+    }
+  ]
+}
+```
+
+**Prompt для второго раунда:**
+
+```
+<|im_start|>system
+[system prompt with tools]<|im_end|>
+<|im_start|>user
+What's the weather in San Francisco?<|im_end|>
+<|im_start|>assistant
+<tool_call>
+<function=get_weather>
+<parameter=location>San Francisco</parameter>
+<parameter=unit>fahrenheit</parameter>
+</function>
+</tool_call><|im_end|>
+<|im_start|>tool
+{"temperature": 72, "condition": "sunny", "humidity": 45}<|im_end|>
+<|im_start|>assistant
+```
+
+**Final response:**
+
+```
+The weather in San Francisco is currently 72°F and sunny, with 45% humidity.
+```
+
+---
+
+### 2.3 Поток данных для tool calls
+
+```
+User Request
+    ↓
+[Tools Definitions] + [Messages]
+    ↓
+Renderer adds tool prompts to system
+    ↓
+Formatted Prompt with tool instructions
+    ↓
+LLM generates response (possibly with tool calls)
+    ↓
+Parser extracts tool calls from stream
+    ↓
+IF tool calls found:
+    Send tool_calls to client
+    ↓
+    Client executes tools
+    ↓
+    Client sends results back
+    ↓
+    New request with tool results in messages
+    ↓
+    LLM generates final answer
+ELSE:
+    Send text response to client
+```
+
+---
+
+### 2.4 Промты для разных моделей
+
+**Qwen3-Coder:** XML-based, подробные инструкции
+**Qwen3-VL:** JSON в XML тегах, короче
+**Command-R:** Python function signatures, JSON actions
+**Generic:** Зависит от шаблона модели
+
+**Критические элементы в промпте:**
+1. Список доступных функций
+2. Формат вызова функций
+3. Формат параметров
+4. Правила использования (когда вызывать, когда нет)
+
+---
