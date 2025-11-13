@@ -307,3 +307,334 @@ def [function_name](
 - Результаты инструментов возвращаются в формате `<results>console_output: [content]</results>`
 
 ---
+
+## 3. Шаблоны форматирования чата (Chat Template Formats)
+
+Эта секция описывает форматы чата для различных моделей. Шаблоны определяют, как сообщения от пользователя, ассистента и системы форматируются для конкретной модели. Каждая модель ожидает определенный формат, и правильное форматирование критически важно для корректной работы.
+
+**Расположение шаблонов:** `template/*.gotmpl`
+
+### 3.1 ChatML формат
+
+**Назначение:** Универсальный формат чата, используемый многими моделями (GPT-3.5, GPT-4, Qwen, и др.). Один из самых распространенных форматов.
+
+**Расположение:** `template/chatml.gotmpl`
+
+**Формат:**
+```
+<|im_start|>system
+[system_message]<|im_end|>
+<|im_start|>user
+[user_message]<|im_end|>
+<|im_start|>assistant
+[assistant_message]<|im_end|>
+<|im_start|>assistant
+```
+
+**Теги:**
+- `<|im_start|>` - начало сообщения (instant message start)
+- `<|im_end|>` - конец сообщения
+- Роли: `system`, `user`, `assistant`
+
+**Особенности:**
+- Простой и читаемый формат
+- Четкое разделение ролей
+- Поддержка системных сообщений
+- Последнее `<|im_start|>assistant` без `<|im_end|>` - приглашение для генерации ответа
+
+---
+
+### 3.2 Llama 2 Chat формат
+
+**Назначение:** Формат для моделей Llama 2 Chat. Использует специальные теги `[INST]` и `<<SYS>>` для инструкций и системных сообщений.
+
+**Расположение:** `template/llama2-chat.gotmpl`
+
+**Формат:**
+```
+[INST] <<SYS>>
+[system_message]
+<</SYS>>
+
+[user_message] [/INST] [assistant_response]</s><s>[INST] [next_user_message] [/INST]
+```
+
+**Теги:**
+- `[INST]...[/INST]` - обрамление инструкций пользователя
+- `<<SYS>>...<</SYS>>` - системное сообщение (вставляется в первую инструкцию)
+- `</s><s>` - разделитель между turn'ами диалога
+
+**Особенности:**
+- Системное сообщение вставляется только в первый `[INST]`
+- Каждая пара user-assistant начинается с нового `<s>` токена
+- Ассистент отвечает сразу после `[/INST]`
+- Поддержка множественных системных сообщений (конкатенируются)
+
+---
+
+### 3.3 Llama 3 Instruct формат
+
+**Назначение:** Формат для моделей Llama 3. Более структурированный по сравнению с Llama 2, использует header tags для ролей.
+
+**Расположение:** `template/llama3-instruct.gotmpl`
+
+**Формат:**
+```
+<|start_header_id|>system<|end_header_id|>
+
+[system_message]<|eot_id|>
+<|start_header_id|>user<|end_header_id|>
+
+[user_message]<|eot_id|>
+<|start_header_id|>assistant<|end_header_id|>
+
+[assistant_message]<|eot_id|>
+<|start_header_id|>assistant<|end_header_id|>
+
+```
+
+**Теги:**
+- `<|start_header_id|>...<|end_header_id|>` - заголовок с ролью
+- `<|eot_id|>` - конец текста (end of text)
+- Роли: `system`, `user`, `assistant`
+
+**Особенности:**
+- Явный заголовок для каждого сообщения
+- Пустая строка после заголовка
+- Пустая строка после каждого `<|eot_id|>`
+- Более чистый и структурированный формат по сравнению с Llama 2
+
+---
+
+### 3.4 Alpaca формат
+
+**Назначение:** Формат для моделей семейства Alpaca. Использует простые текстовые метки для инструкций и ответов.
+
+**Расположение:** `template/alpaca.gotmpl`
+
+**Формат:**
+```
+[system_message]
+
+### Instruction:
+[user_message]
+
+### Response:
+[assistant_message]
+
+### Instruction:
+[next_user_message]
+
+### Response:
+```
+
+**Метки:**
+- `### Instruction:` - пользовательская инструкция
+- `### Response:` - ответ ассистента
+- Системное сообщение идет в начале без метки
+
+**Особенности:**
+- Простой текстовый формат без специальных токенов
+- Системное сообщение выводится перед первой инструкцией
+- Два переноса строки между секциями
+- Последний `### Response:` без ответа - приглашение к генерации
+
+---
+
+### 3.5 Gemma Instruct формат
+
+**Назначение:** Формат для моделей Google Gemma. Использует теги начала/конца очереди (turn) для структурирования диалога.
+
+**Расположение:** `template/gemma-instruct.gotmpl`
+
+**Формат:**
+```
+<start_of_turn>user
+[system_message (if exists)][user_message]<end_of_turn>
+<start_of_turn>model
+[assistant_message]<end_of_turn>
+<start_of_turn>model
+```
+
+**Теги:**
+- `<start_of_turn>` - начало очереди (turn)
+- `<end_of_turn>` - конец очереди
+- Роли: `user`, `model` (не `assistant`!)
+
+**Особенности:**
+- Использует `model` вместо `assistant` для роли AI
+- Системное сообщение вставляется в начало первого пользовательского сообщения
+- Системные сообщения не показываются явно, а объединяются с user message
+- Множественные системные сообщения конкатенируются
+
+---
+
+### 3.6 Mistral Instruct формат
+
+**Назначение:** Формат для моделей Mistral. Похож на Llama 2, но с некоторыми отличиями.
+
+**Расположение:** `template/mistral-instruct.gotmpl`
+
+**Формат:**
+```
+[INST] [user_message] [/INST] [assistant_message]</s>[INST] [next_user_message] [/INST]
+```
+
+**Особенности:**
+- Похож на Llama 2, но без специальных тегов для системных сообщений
+- Системное сообщение включается в первый `[INST]`
+- `</s>` разделяет turn'ы
+- Более простой формат по сравнению с Llama 2
+
+---
+
+### 3.7 Phi-3 формат
+
+**Назначение:** Формат для моделей Microsoft Phi-3. Использует простые токены разделители для ролей.
+
+**Расположение:** `template/phi-3.gotmpl`
+
+**Формат:**
+```
+<|system|>
+[system_message]<|end|>
+<|user|>
+[user_message]<|end|>
+<|assistant|>
+[assistant_message]<|end|>
+<|assistant|>
+```
+
+**Теги:**
+- `<|system|>`, `<|user|>`, `<|assistant|>` - теги ролей
+- `<|end|>` - конец сообщения
+
+**Особенности:**
+- Очень простой формат
+- Явные роли для каждого сообщения
+- Универсальный тег конца `<|end|>` для всех ролей
+
+---
+
+### 3.8 Zephyr формат
+
+**Назначение:** Формат для моделей Zephyr (тюнинг Mistral). Используется для instruction-following моделей.
+
+**Расположение:** `template/zephyr.gotmpl`
+
+**Формат:**
+```
+<|system|>
+[system_message]</s>
+<|user|>
+[user_message]</s>
+<|assistant|>
+[assistant_message]</s>
+<|assistant|>
+```
+
+**Особенности:**
+- Похож на Phi-3, но использует `</s>` вместо `<|end|>`
+- Каждая роль имеет свой тег
+- Простота и читаемость
+
+---
+
+### 3.9 Vicuna формат
+
+**Назначение:** Формат для моделей Vicuna. Использует простые текстовые метки в верхнем регистре.
+
+**Расположение:** `template/vicuna.gotmpl`
+
+**Формат:**
+```
+[system_message]
+
+USER: [user_message]
+ASSISTANT: [assistant_message]
+USER: [next_user_message]
+ASSISTANT:
+```
+
+**Особенности:**
+- Простые текстовые метки `USER:` и `ASSISTANT:`
+- Системное сообщение в начале без метки
+- Два переноса строки между секциями
+- Очень читаемый формат
+
+---
+
+### 3.10 Command-R формат (Cohere)
+
+**Назначение:** Сложный формат для модели Command-R от Cohere. Поддерживает инструменты, системные промты, preambles.
+
+**Расположение:** `template/command-r.gotmpl`
+
+**Формат:**
+```
+<|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>
+# Safety Preamble
+[safety instructions]
+
+# System Preamble
+## Basic Rules
+[system instructions]
+
+# User Preamble
+[custom system message]
+
+## Available Tools
+[tool definitions in Python format]
+<|END_OF_TURN_TOKEN|>
+
+<|START_OF_TURN_TOKEN|><|USER_TOKEN|>[user_message]
+<|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>Write 'Action:' followed by a json-formatted list of actions...
+<|END_OF_TURN_TOKEN|>
+
+<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>[assistant_message]<|END_OF_TURN_TOKEN|>
+
+<|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|><results>
+console_output: [tool_result]
+</results><|END_OF_TURN_TOKEN|>
+
+<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>
+```
+
+**Теги:**
+- `<|START_OF_TURN_TOKEN|>`, `<|END_OF_TURN_TOKEN|>` - начало/конец очереди
+- `<|SYSTEM_TOKEN|>` - системное сообщение
+- `<|USER_TOKEN|>` - пользователь
+- `<|CHATBOT_TOKEN|>` - чат-бот (вместо assistant)
+
+**Особенности:**
+- Самый сложный формат с множеством структурных элементов
+- Встроенные preambles для безопасности и поведения
+- Инструменты описываются как Python функции
+- Специальные промты для вызова инструментов
+- Результаты инструментов оборачиваются в `<results>` теги
+
+---
+
+### Общие паттерны форматирования
+
+Все шаблоны следуют общим принципам:
+
+1. **Роли:** Всегда есть роли `system`, `user`, `assistant` (или их варианты: `model`, `chatbot`)
+2. **Системное сообщение:** Обычно идет первым или включается в первое user сообщение
+3. **Разделители:** Специальные токены для разделения сообщений (`</s>`, `<|end|>`, `<|eot_id|>`, etc.)
+4. **Приглашение к генерации:** Шаблон заканчивается открытым тегом assistant для начала генерации
+5. **Мультисистемные сообщения:** Многие шаблоны поддерживают конкатенацию нескольких system messages
+
+**Таблица сравнения форматов:**
+
+| Модель | Формат ролей | Разделитель | Сложность |
+|--------|--------------|-------------|-----------|
+| ChatML | `<\|im_start\|>role` | `<\|im_end\|>` | Простая |
+| Llama 2 | `[INST]...[/INST]` | `</s><s>` | Средняя |
+| Llama 3 | `<\|start_header_id\|>role<\|end_header_id\|>` | `<\|eot_id\|>` | Средняя |
+| Alpaca | `### Instruction:` / `### Response:` | Текст | Простая |
+| Gemma | `<start_of_turn>role` | `<end_of_turn>` | Простая |
+| Phi-3 | `<\|role\|>` | `<\|end\|>` | Простая |
+| Command-R | `<\|ROLE_TOKEN\|>` | `<\|END_OF_TURN_TOKEN\|>` | Сложная |
+
+---
